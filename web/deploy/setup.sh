@@ -88,6 +88,31 @@ systemctl daemon-reload
 systemctl enable stratum-racer.service
 systemctl restart stratum-racer.service
 
+if [ "${WITH_PROXY:-no}" = "yes" ]; then
+  echo "==> installing measurement proxy (miners point at port ${PROXY_PORT:-3333})"
+  if [ "${RESET_ROTATION:-no}" = "yes" ]; then
+    echo "==> RESET_ROTATION=yes: rotation restarts at the first pool"
+    rm -f /var/lib/stratum-race/proxy-rotation.state
+  fi
+  mkdir -p /var/lib/stratum-race/active
+  chown -R stratumrace:stratumrace /var/lib/stratum-race
+  if [ ! -f /etc/stratum-race/proxy.env ]; then
+    {
+      echo "PROXY_PORT=${PROXY_PORT:-3333}"
+      echo "RACES_PER_POOL=20"
+      echo "MAX_MINUTES=300"
+      echo "PROXY_EXTRA_ARGS="
+    } > /etc/stratum-race/proxy.env
+  fi
+  cp "$REPO_DIR/web/deploy/stratum-proxy.service" /etc/systemd/system/stratum-proxy.service
+  systemctl daemon-reload
+  systemctl enable stratum-proxy.service
+  systemctl restart stratum-proxy.service
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow "${PROXY_PORT:-3333}/tcp" >/dev/null || true
+  fi
+fi
+
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   echo "==> opening firewall ports 80/443"
   ufw allow 80/tcp >/dev/null || true
@@ -108,7 +133,9 @@ nginx -t
 systemctl reload nginx
 
 echo "==> requesting TLS certificate (best effort)"
-if certbot certificates 2>/dev/null | grep -q "Domains:.*${DOMAIN}"; then
+if echo "$DOMAIN" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "DOMAIN is a bare IP — skipping certbot; site stays HTTP-only"
+elif certbot certificates 2>/dev/null | grep -q "Domains:.*${DOMAIN}"; then
   echo "certificate already present"
   if ! grep -q "listen 443" "$NGINX_CONF"; then
     echo "re-attaching existing certificate to nginx config"

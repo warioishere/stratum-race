@@ -1,0 +1,25 @@
+[Unit]
+Description=Stratum Race measurement proxy (real-miner pass-through with notify timestamping)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stratumrace
+Group=stratumrace
+EnvironmentFile=-/etc/stratum-race/proxy.env
+ExecStart=/usr/bin/python3 /opt/stratum-race/web/proxy/stratum_proxy.py \
+    --pools /opt/stratum-race/web/pools/web-pools.json \
+    --listen ${PROXY_PORT} \
+    --races-per-pool ${RACES_PER_POOL} \
+    --max-minutes ${MAX_MINUTES} \
+    $PROXY_EXTRA_ARGS
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/stratum-race
+
+[Install]
+WantedBy=multi-user.target

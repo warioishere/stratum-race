@@ -14,9 +14,12 @@ VANTAGE="${VANTAGE:-}"
 
 mkdir -p "$DATA_DIR" "$WEB_ROOT/data"
 
+ACTIVE_DIR="${ACTIVE_DIR:-/var/lib/stratum-race/active}"
+
 aggregate() {
   python3 "$REPO_DIR/web/aggregate.py" \
     --sessions "$DATA_DIR" \
+    --active-dir "$ACTIVE_DIR" \
     --out "$WEB_ROOT/data/leaderboard.json" \
     --vantage "$VANTAGE" || echo "aggregate failed" >&2
 }

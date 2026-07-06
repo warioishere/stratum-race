@@ -26,6 +26,14 @@ on:
         description: Set to "yes" to wipe all collected race sessions and restart stats from zero
         required: false
         default: "no"
+      with_proxy:
+        description: Set to "yes" to install the measurement proxy (miners connect on port 3333)
+        required: false
+        default: "no"
+      reset_rotation:
+        description: Set to "yes" to restart the proxy rotation at the first pool
+        required: false
+        default: "no"
 
 permissions:
   contents: read
@@ -55,8 +63,17 @@ jobs:
         run: |
           set -euo pipefail
           SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
-          sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "mkdir -p /opt/stratum-race"
-          sshpass -e rsync -a --delete --exclude '.git' -e "ssh $SSH_OPTS" ./ "$SSH_USER@$HOST:/opt/stratum-race/"
+          # Non-root users take ownership of /opt/stratum-race so the copy can
+          # write; sudo -S reads the password from stdin (never argv), and is
+          # a no-op extra stdin line under NOPASSWD.
+          if [ "$SSH_USER" = "root" ]; then
+            sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "mkdir -p /opt/stratum-race"
+          else
+            printf '%s\n' "$SSHPASS" | sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
+              "sudo -S -p '' bash -c 'mkdir -p /opt/stratum-race && chown -R $SSH_USER /opt/stratum-race'"
+          fi
+          # tar-over-ssh: no rsync needed on a fresh server.
+          tar -czf - --exclude='.git' . | sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "tar -xzf - -C /opt/stratum-race"
 
       - name: Reset collected data
         if: inputs.reset_data == 'yes'
@@ -67,8 +84,12 @@ jobs:
         run: |
           set -euo pipefail
           SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
-          sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
-            "systemctl stop stratum-racer 2>/dev/null || true; rm -f /var/lib/stratum-race/sessions/session-*.json; echo 'race sessions wiped'"
+          CMD="systemctl stop stratum-racer 2>/dev/null || true; rm -f /var/lib/stratum-race/sessions/session-*.json; echo 'race sessions wiped'"
+          if [ "$SSH_USER" = "root" ]; then
+            sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "$CMD"
+          else
+            printf '%s\n' "$SSHPASS" | sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "sudo -S -p '' bash -c \"$CMD\""
+          fi
 
       - name: Run setup on server
         env:
@@ -76,11 +97,18 @@ jobs:
           HOST: ${{ inputs.host }}
           SSH_USER: ${{ inputs.ssh_user }}
           DOMAIN: ${{ inputs.domain }}
+          WITH_PROXY: ${{ inputs.with_proxy }}
+          RESET_ROTATION: ${{ inputs.reset_rotation }}
         run: |
           set -euo pipefail
           SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
-          sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
-            "DOMAIN=$DOMAIN bash /opt/stratum-race/web/deploy/setup.sh"
+          if [ "$SSH_USER" = "root" ]; then
+            sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
+              "DOMAIN=$DOMAIN WITH_PROXY=$WITH_PROXY RESET_ROTATION=$RESET_ROTATION bash /opt/stratum-race/web/deploy/setup.sh"
+          else
+            printf '%s\n' "$SSHPASS" | sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
+              "sudo -S -p '' DOMAIN=$DOMAIN WITH_PROXY=$WITH_PROXY RESET_ROTATION=$RESET_ROTATION bash /opt/stratum-race/web/deploy/setup.sh"
+          fi
 
       - name: Verify site responds
         env:
@@ -92,7 +120,10 @@ jobs:
           echo "--- HTTP status ---"
           curl -sS -o /dev/null -w "%{http_code}\n" "http://$HOST/" -H "Host: $DOMAIN"
           echo "--- leaderboard.json head ---"
-          curl -sS "http://$HOST/data/leaderboard.json" -H "Host: $DOMAIN" | head -c 400
+          # curl to a file first: piping into head trips pipefail via SIGPIPE
+          # once the payload outgrows the head window.
+          curl -sS "http://$HOST/data/leaderboard.json" -H "Host: $DOMAIN" -o /tmp/lb.json
+          head -c 400 /tmp/lb.json
           echo
           echo "--- HTTPS (if certbot succeeded) ---"
           curl -sS -o /dev/null -w "%{http_code}\n" "https://$DOMAIN/" --resolve "$DOMAIN:443:$HOST" || true

@@ -1,0 +1,68 @@
+# Read-only health check for a deployed stratum-race box. Prints service
+# status, proxy rotation progress, and a leaderboard summary to the run log.
+# Makes no changes on the server. Credentials are one-time masked inputs.
+name: Status check
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: Server hostname or IP
+        required: true
+      ssh_user:
+        description: SSH user
+        required: true
+        default: root
+      ssh_password:
+        description: One-time SSH password (masked, not stored)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mask password
+        env:
+          PW: ${{ inputs.ssh_password }}
+        run: echo "::add-mask::$PW"
+
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+
+      - name: Collect status
+        env:
+          SSHPASS: ${{ inputs.ssh_password }}
+          HOST: ${{ inputs.host }}
+          SSH_USER: ${{ inputs.ssh_user }}
+        run: |
+          set -uo pipefail
+          SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
+          CMD='
+            echo "=== services ===";
+            systemctl is-active stratum-racer stratum-proxy nginx 2>&1;
+            echo "=== proxy journal (last 25) ===";
+            journalctl -u stratum-proxy -n 25 --no-pager -o short 2>&1;
+            echo "=== racer journal (last 8) ===";
+            journalctl -u stratum-racer -n 8 --no-pager -o short 2>&1;
+            echo "=== rotation state ===";
+            cat /var/lib/stratum-race/proxy-rotation.state 2>/dev/null || echo "(no state file)";
+            echo "=== active event files ===";
+            ls -la /var/lib/stratum-race/active/ 2>/dev/null | tail -15;
+            echo "=== leaderboard summary ===";
+            curl -s http://127.0.0.1/data/leaderboard.json | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)
+          print(\"generated:\", d[\"generated_utc\"], \"| sessions:\", d[\"sessions\"], \"| races:\", d[\"races\"])
+          for t in d.get(\"active_tests\", []): print(\"active:\", t)
+          " 2>&1;
+            echo "=== disk ===";
+            df -h / | tail -1
+          '
+          if [ "$SSH_USER" = "root" ]; then
+            sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "bash -c '$CMD'"
+          else
+            printf '%s\n' "$SSHPASS" | sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "sudo -S -p '' bash -c '$CMD'"
+          fi

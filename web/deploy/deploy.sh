@@ -29,7 +29,14 @@ Usage: deploy.sh [--host user@server] --domain example.com [options]
                        DigitalOcean when omitted.
   --reset              Wipe all collected race sessions and restart the
                        stats from zero.
+  --with-proxy         Also run the measurement proxy: point a real miner at
+                       stratum+tcp://SERVER:3333 and it relays to one pool at
+                       a time (rotating every ~20 blocks), timestamping
+                       notifies on a share-submitting connection.
   --help               Show this help.
+
+DOMAIN may be a bare IP for testing — TLS is skipped and the site serves
+plain HTTP.
 
 What it does: installs nginx + certbot + a systemd service that races the
 pools continuously, publishes the site at https://DOMAIN/, and requests a
@@ -41,6 +48,7 @@ HOST=""
 DOMAIN=""
 VANTAGE_ARG=""
 RESET="no"
+WITH_PROXY="no"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +56,7 @@ while [ $# -gt 0 ]; do
     --domain)  DOMAIN="${2:?--domain needs a value}"; shift 2 ;;
     --vantage) VANTAGE_ARG="${2:?--vantage needs a value}"; shift 2 ;;
     --reset)   RESET="yes"; shift ;;
+    --with-proxy) WITH_PROXY="yes"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -68,7 +77,7 @@ if [ -z "$HOST" ]; then
     echo "error: local install must run as root (try: sudo $0 --domain $DOMAIN)" >&2
     exit 1
   fi
-  DOMAIN="$DOMAIN" VANTAGE="$VANTAGE_ARG" RESET_DATA="$RESET" \
+  DOMAIN="$DOMAIN" VANTAGE="$VANTAGE_ARG" RESET_DATA="$RESET" WITH_PROXY="$WITH_PROXY" \
     bash "$REPO_ROOT/web/deploy/setup.sh"
   exit 0
 fi
@@ -80,14 +89,20 @@ tar -C "$REPO_ROOT" -czf - --exclude='.git' . \
   | ssh "$HOST" "mkdir -p '$REMOTE_DIR' && tar -xzf - -C '$REMOTE_DIR'"
 
 echo "==> running setup on $HOST (domain: $DOMAIN)"
-ssh -t "$HOST" "DOMAIN='$DOMAIN' VANTAGE='$VANTAGE_ARG' RESET_DATA='$RESET' bash '$REMOTE_DIR/web/deploy/setup.sh'"
+ssh -t "$HOST" "DOMAIN='$DOMAIN' VANTAGE='$VANTAGE_ARG' RESET_DATA='$RESET' WITH_PROXY='$WITH_PROXY' bash '$REMOTE_DIR/web/deploy/setup.sh'"
 
 echo "==> verifying"
 sleep 3
-code="$(curl -so /dev/null -w '%{http_code}' --max-time 15 "https://$DOMAIN/" || true)"
-if [ "$code" = "200" ]; then
-  echo "Deployed: https://$DOMAIN/ is live."
+if echo "$DOMAIN" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+  SCHEME="http"
 else
-  echo "Site not answering over HTTPS yet (got '$code')."
+  SCHEME="https"
+fi
+code="$(curl -so /dev/null -w '%{http_code}' --max-time 15 "$SCHEME://$DOMAIN/" || true)"
+if [ "$code" = "200" ]; then
+  echo "Deployed: $SCHEME://$DOMAIN/ is live."
+  [ "$WITH_PROXY" = "yes" ] && echo "Measurement proxy: point your miner at stratum+tcp://$DOMAIN:3333 (any worker name)."
+else
+  echo "Site not answering over $SCHEME yet (got '$code')."
   echo "If DNS for $DOMAIN was pointed at the server only recently, wait for it to propagate and re-run this script so certbot can issue the certificate."
 fi

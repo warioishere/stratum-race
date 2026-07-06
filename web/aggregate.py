@@ -104,6 +104,48 @@ def blocks_last_24h() -> Optional[Dict[str, int]]:
         return None
 
 
+def load_active_events(active_dir: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    """Per pool: notify events and share tallies from stratum_proxy.py logs.
+
+    Returns {pool: {"notifies": {prevhash: {"t": first_seen_epoch,
+    "t_nonempty": first_nonempty_epoch}}, "accepted": n, "rejected": n}}.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not active_dir or not active_dir.is_dir():
+        return out
+    for path in sorted(active_dir.glob("active-*.jsonl")):
+        for line in path.read_text().splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            pool = ev.get("pool")
+            if not pool:
+                continue
+            rec = out.setdefault(
+                pool, {"notifies": {}, "accepted": 0, "rejected": 0}
+            )
+            if "share" in ev:
+                if ev["share"] == "accepted":
+                    rec["accepted"] += 1
+                else:
+                    rec["rejected"] += 1
+                continue
+            ph, t = ev.get("prevhash"), ev.get("t")
+            if not ph or t is None:
+                continue
+            # Only new-block notifies are race arrivals; the initial job at
+            # connect references a minutes-old block. Events written before
+            # the flag existed pass through and are sanity-bounded at join.
+            if ev.get("new_block") is False:
+                continue
+            n = rec["notifies"].setdefault(ph, {"t": t, "t_nonempty": None})
+            n["t"] = min(n["t"], t)
+            if not ev.get("empty") and (n["t_nonempty"] is None or t < n["t_nonempty"]):
+                n["t_nonempty"] = t
+    return out
+
+
 def load_sessions(sessions_dir: Path) -> List[Dict[str, Any]]:
     sessions = []
     for path in sorted(sessions_dir.glob("*.json")):
@@ -152,7 +194,9 @@ def stats_for(offsets: List[float]) -> Dict[str, Optional[float]]:
 
 
 def build_pool_rows(
-    sessions: List[Dict[str, Any]], races: List[Dict[str, Any]]
+    sessions: List[Dict[str, Any]],
+    races: List[Dict[str, Any]],
+    active: Dict[str, Dict[str, Any]],
 ) -> "tuple[List[Dict[str, Any]], float]":
     pools: Dict[str, Dict[str, Any]] = {}
 
@@ -250,6 +294,34 @@ def build_pool_rows(
             elif name in empty_first and name in nonempty and delta is not None:
                 gap = max(0.0, float(nonempty[name]) + float(delta) - off_f)
             e["gap_samples"].append(gap)
+
+        # Join active-connection (real miner via stratum_proxy.py) events to
+        # this race by block hash: the same wall clock recorded both, since
+        # proxy and listeners run on one machine. Negative active offsets mean
+        # the working connection was served before the fastest idle listener.
+        first_epoch = race.get("first_epoch")
+        prevhash = race.get("prevhash")
+        if first_epoch and prevhash:
+            for pool_name, rec in active.items():
+                n = rec["notifies"].get(prevhash)
+                if not n:
+                    continue
+                active_off = (n["t"] - first_epoch) * 1000.0
+                # Sanity bound: a real arrival lands within the confirm window
+                # of the race start; anything further out is a stale-job or
+                # clock artifact, not a measurement.
+                if abs(active_off) > 30_000:
+                    continue
+                e = entry(pool_name)
+                e.setdefault("active_samples", []).append(active_off)
+                idle_off = arrivals.get(pool_name)
+                if idle_off is not None:
+                    try:
+                        e.setdefault("penalty_samples", []).append(
+                            float(idle_off) - active_off
+                        )
+                    except (TypeError, ValueError):
+                        pass
         for name, offset in nonempty.items():
             try:
                 entry(name)["offsets"].append(float(offset))
@@ -269,6 +341,9 @@ def build_pool_rows(
         offsets = e.pop("offsets")
         stale_samples = e.pop("stale_samples")
         gap_samples = e.pop("gap_samples")
+        active_samples = e.pop("active_samples", [])
+        penalty_samples = e.pop("penalty_samples", [])
+        rec = active.get(e["name"], {})
         # Downtime-equivalent waste: stale time is a total loss (the miner is
         # hashing a block that would be orphaned); empty-template time costs
         # only the fee share of the reward. Normalized against the 10-minute
@@ -313,6 +388,11 @@ def build_pool_rows(
                 "waste_min_day": waste_min_day,
                 "stale_ms_avg": stale_avg,
                 "empty_gap_ms_avg": gap_avg,
+                "active_races": len(active_samples),
+                "active_median_ms": round(statistics.median(active_samples), 3) if active_samples else None,
+                "idle_penalty_ms": round(statistics.median(penalty_samples), 3) if penalty_samples else None,
+                "shares_accepted": rec.get("accepted", 0),
+                "shares_rejected": rec.get("rejected", 0),
                 "tier": tier,
                 "blocks_24h": blocks_24h,
                 "status": status,
@@ -374,12 +454,15 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="Path to write leaderboard.json")
     ap.add_argument("--recent", type=int, default=40, help="How many recent races to include")
     ap.add_argument("--vantage", default="", help="Optional label describing the measurement vantage point")
+    ap.add_argument("--active-dir", default="/var/lib/stratum-race/active",
+                    help="Directory of stratum_proxy.py active-*.jsonl event logs")
     args = ap.parse_args()
 
     sessions_dir = Path(args.sessions)
     sessions = load_sessions(sessions_dir) if sessions_dir.is_dir() else []
     races = merge_races(sessions)
-    rows, fee_frac = build_pool_rows(sessions, races)
+    active = load_active_events(Path(args.active_dir) if args.active_dir else None)
+    rows, fee_frac = build_pool_rows(sessions, races, active)
 
     total_secs = sum(s.get("meta", {}).get("duration_seconds") or 0 for s in sessions)
     payload = {
@@ -393,6 +476,18 @@ def main() -> None:
         "min_races_for_rank": MIN_RACES_FOR_RANK,
         "ranking_basis": "first non-empty template",
         "fee_fraction_pct": round(100.0 * fee_frac, 2),
+        "active_tests": [
+            {
+                "pool": r["name"],
+                "races": r["active_races"],
+                "active_median_ms": r["active_median_ms"],
+                "idle_penalty_ms": r["idle_penalty_ms"],
+                "shares_accepted": r["shares_accepted"],
+                "shares_rejected": r["shares_rejected"],
+            }
+            for r in rows
+            if r["active_races"] > 0 or r["shares_accepted"] > 0
+        ],
         "waste_note": (
             "waste_min_day = downtime-equivalent minutes of mining lost per day: "
             "(avg stale ms + fee_fraction x avg empty-template ms) / 600s block interval x 1440. "

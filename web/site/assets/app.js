@@ -90,6 +90,14 @@
           + ")";
       }
       tr.appendChild(wTd);
+      var ip = p.idle_penalty_ms;
+      var ipTd = el("td", "num" + (ip !== null && ip !== undefined && ip <= 0 ? " muted-cell" : ""),
+        (ip === null || ip === undefined) ? "—" : (ip >= 0 ? "+" : "−") + fmt(Math.abs(ip), 0));
+      if (ip !== null && ip !== undefined) {
+        ipTd.title = "Idle connection served " + fmt(Math.abs(ip), 1) + " ms " + (ip >= 0 ? "later" : "earlier")
+          + " than the share-submitting connection (median, " + (p.active_races || 0) + " paired blocks)";
+      }
+      tr.appendChild(ipTd);
       tr.appendChild(el("td", "num", p.seen + "/" + data.races));
       tbody.appendChild(tr);
     });
@@ -97,7 +105,7 @@
     if (shown.length === 0 && ranked.length > 0) {
       var emptyTr = el("tr");
       var td = el("td", "muted-cell", "No " + currentFilter + " pools ranked yet.");
-      td.colSpan = 10;
+      td.colSpan = 11;
       emptyTr.appendChild(td);
       tbody.appendChild(emptyTr);
     }
@@ -126,6 +134,26 @@
       tbody.appendChild(tr);
     });
     $("races-panel").classList.toggle("hidden", !data.recent_races || data.recent_races.length === 0);
+  }
+
+  function renderActiveTests(data) {
+    var tests = data.active_tests || [];
+    var panel = $("active-panel");
+    panel.classList.toggle("hidden", tests.length === 0);
+    if (tests.length === 0) return;
+    var tbody = $("active-tests").tBodies[0];
+    tbody.textContent = "";
+    tests.forEach(function (t) {
+      var tr = el("tr");
+      tr.appendChild(el("td", "pool-name", prettyName(t.pool)));
+      tr.appendChild(el("td", "num", String(t.races)));
+      tr.appendChild(el("td", "num", fmt(t.active_median_ms)));
+      var pen = el("td", "num", t.idle_penalty_ms === null ? "—" : fmt(t.idle_penalty_ms));
+      if (t.idle_penalty_ms !== null && t.idle_penalty_ms > 500) pen.className = "num median-strong";
+      tr.appendChild(pen);
+      tr.appendChild(el("td", "num", String(t.shares_accepted)));
+      tbody.appendChild(tr);
+    });
   }
 
   function renderWatchlist(data) {
@@ -186,6 +214,7 @@
     renderTiles(data);
     renderLeaderboard(data);
     renderRaces(data);
+    renderActiveTests(data);
     renderWatchlist(data);
   }
 

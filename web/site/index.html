@@ -64,6 +64,7 @@
             <th class="num" title="Races where this pool delivered the first full (non-empty) template, and that as a share of its races">Wins</th>
             <th class="num" title="Share of races where this pool's first notify was an empty (coinbase-only) template — hashing on it earns no fees until the full template arrives">Empty 1st</th>
             <th class="num" title="Downtime equivalent: expected minutes of mining lost per day to this pool's late templates. Time before ANY new template counts fully (that work would be orphaned); time on an empty template counts only at the current fee share of the block reward. Relative to the fastest pool here, so a lower bound">Waste/day</th>
+            <th class="num" title="Idle penalty: median extra delay (ms) an idle listener experiences versus a connection submitting real shares to the same pool, paired per block via the active-miner proxy. Positive = the pool serves non-working connections later. '—' = not measured with real hashrate yet">Idle Δ</th>
             <th class="num" title="Races this pool delivered the new block in / total blocks raced">Races</th>
           </tr>
         </thead>
@@ -90,6 +91,27 @@
             <th class="num" title="Milliseconds between the winner and the runner-up">Gap (ms)</th>
             <th class="num" title="Milliseconds between the winner and the slowest pool that delivered this block">Spread (ms)</th>
             <th class="num" title="Number of pools that delivered any notification for this block">Pools</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel hidden" id="active-panel">
+    <div class="panel-head">
+      <h2>Active-miner tests</h2>
+      <span class="panel-note">timings from a connection submitting real shares via the measurement proxy — the idle penalty is how much later the idle listener was served for the same blocks</span>
+    </div>
+    <div class="table-scroll">
+      <table id="active-tests">
+        <thead>
+          <tr>
+            <th title="Pool under active test">Pool</th>
+            <th class="num" title="Blocks observed on the share-submitting connection">Blocks</th>
+            <th class="num" title="Median arrival of the active connection's notify, relative to the fastest idle listener in each race. Negative = the working connection was served before any idle connection">Active median (ms)</th>
+            <th class="num" title="Median of (idle arrival − active arrival) for the same pool and block. Positive = idle connections are served later, confirming deprioritization">Idle penalty (ms)</th>
+            <th class="num" title="Shares the pool accepted from our miner during the test — proof the connection was treated as a real miner">Shares ✓</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -129,6 +151,14 @@
       the reward (<span id="fee-frac">~2</span>% right now — the subsidy is still earned). At today's low fees, empty
       jump-starts cost miners almost nothing; when fees spike, that math changes dramatically. All figures are
       relative to the fastest pool from this vantage, so they are lower bounds.
+    </p>
+    <p>
+      <strong>Idle penalty (Idle Δ):</strong> some pools deliver work to connections that submit real shares before
+      idle ones. A measurement proxy relays an actual miner through this server, timestamping notifies on that
+      working connection; pairing them per block with the idle listener's arrivals gives each pool's
+      <em>idle penalty</em> — how much later a lurker is served than a real miner. Idle-listener rankings are a fair
+      proxy for pools with a penalty near zero, and worst-case for pools with a large one. Pools rotate through the
+      active test (~20 blocks each); see <em>Active-miner tests</em> below for the current one.
     </p>
     <p>
       A win means <strong>this client observed that pool first from this network vantage point</strong> — it is not proof
