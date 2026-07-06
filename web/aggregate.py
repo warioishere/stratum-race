@@ -61,6 +61,34 @@ FALLBACK_BIG = {
 }
 
 
+BLOCK_INTERVAL_MS = 600_000.0
+BLOCK_SUBSIDY_SATS = 312_500_000  # 3.125 BTC until the 2028 halving
+DEFAULT_FEE_FRACTION = 0.02  # used when the live lookup fails
+
+
+def current_fee_fraction() -> float:
+    """Fees as a fraction of total block reward, averaged over recent blocks.
+
+    Weights the cost of mining an empty (coinbase-only) template: the subsidy
+    is still earned, only the fee portion is forfeited.
+    """
+    try:
+        req = urllib.request.Request(
+            "https://mempool.space/api/v1/blocks",
+            headers={"User-Agent": "stratum-race-web/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            blocks = json.loads(resp.read().decode())
+        fees = [b["extras"]["totalFees"] for b in blocks if "extras" in b]
+        if not fees:
+            return DEFAULT_FEE_FRACTION
+        avg = sum(fees) / len(fees)
+        return avg / (avg + BLOCK_SUBSIDY_SATS)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        print(f"fee fraction lookup failed: {exc}", file=sys.stderr)
+        return DEFAULT_FEE_FRACTION
+
+
 def blocks_last_24h() -> Optional[Dict[str, int]]:
     """slug -> blocks found in the last 24h, or None if the lookup failed."""
     try:
@@ -125,7 +153,7 @@ def stats_for(offsets: List[float]) -> Dict[str, Optional[float]]:
 
 def build_pool_rows(
     sessions: List[Dict[str, Any]], races: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+) -> "tuple[List[Dict[str, Any]], float]":
     pools: Dict[str, Dict[str, Any]] = {}
 
     def entry(name: str) -> Dict[str, Any]:
@@ -141,6 +169,8 @@ def build_pool_rows(
                 "missed": 0,
                 "empty_first": 0,
                 "offsets": [],
+                "stale_samples": [],
+                "gap_samples": [],
                 "reconnects": 0,
                 "read_timeouts": 0,
                 "remote_closes": 0,
@@ -194,11 +224,32 @@ def build_pool_rows(
         winner = race.get("winner_nonempty") or race.get("winner")
         for name in race.get("eligible_at_start", []) or arrivals.keys():
             entry(name)["eligible"] += 1
-        for name in arrivals:
+        gaps = race.get("empty_to_full_ms") or {}
+        # Older sessions lack empty_to_full_ms; the two offset sets have
+        # different zero points, so recover the shift from the non-empty
+        # winner when its first notify was already a full template.
+        winner_ne = race.get("winner_nonempty")
+        delta = None
+        if winner_ne and winner_ne not in empty_first:
+            delta = arrivals.get(winner_ne)
+        for name, off in arrivals.items():
             e = entry(name)
             e["seen"] += 1
             if name in empty_first:
                 e["empty_first"] += 1
+            try:
+                off_f = float(off)
+            except (TypeError, ValueError):
+                continue
+            # Stale window: time this pool's miners kept hashing the OLD
+            # block, measured against the first notify seen anywhere.
+            e["stale_samples"].append(off_f)
+            gap = 0.0
+            if name in gaps:
+                gap = float(gaps[name])
+            elif name in empty_first and name in nonempty and delta is not None:
+                gap = max(0.0, float(nonempty[name]) + float(delta) - off_f)
+            e["gap_samples"].append(gap)
         for name, offset in nonempty.items():
             try:
                 entry(name)["offsets"].append(float(offset))
@@ -212,9 +263,25 @@ def build_pool_rows(
     # Tier: "big" = the pool (or its mempool.space counterpart) found at least
     # one block in the last 24 hours; everything else is "small".
     found_24h = blocks_last_24h()
+    fee_frac = current_fee_fraction()
     rows = []
     for e in pools.values():
         offsets = e.pop("offsets")
+        stale_samples = e.pop("stale_samples")
+        gap_samples = e.pop("gap_samples")
+        # Downtime-equivalent waste: stale time is a total loss (the miner is
+        # hashing a block that would be orphaned); empty-template time costs
+        # only the fee share of the reward. Normalized against the 10-minute
+        # average block interval and expressed as minutes per day.
+        if stale_samples:
+            stale_avg = statistics.fmean(stale_samples)
+            gap_avg = statistics.fmean(gap_samples) if gap_samples else 0.0
+            effective_ms = stale_avg + fee_frac * gap_avg
+            waste_min_day = round(effective_ms / BLOCK_INTERVAL_MS * 1440.0, 2)
+            stale_avg = round(stale_avg, 1)
+            gap_avg = round(gap_avg, 1)
+        else:
+            stale_avg = gap_avg = waste_min_day = None
         slug = MEMPOOL_SLUGS.get(e["name"])
         if found_24h is not None:
             blocks_24h = found_24h.get(slug, 0) if slug else 0
@@ -243,6 +310,9 @@ def build_pool_rows(
                 "win_pct": round(100.0 * e["wins"] / seen, 1) if seen else None,
                 "seen_pct": round(100.0 * seen / eligible, 1) if eligible else None,
                 "empty_first_pct": round(100.0 * e["empty_first"] / seen, 1) if seen else None,
+                "waste_min_day": waste_min_day,
+                "stale_ms_avg": stale_avg,
+                "empty_gap_ms_avg": gap_avg,
                 "tier": tier,
                 "blocks_24h": blocks_24h,
                 "status": status,
@@ -262,7 +332,7 @@ def build_pool_rows(
             r["rank"] = rank
         else:
             r["rank"] = None
-    return rows
+    return rows, fee_frac
 
 
 def recent_races(races: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
@@ -309,7 +379,7 @@ def main() -> None:
     sessions_dir = Path(args.sessions)
     sessions = load_sessions(sessions_dir) if sessions_dir.is_dir() else []
     races = merge_races(sessions)
-    rows = build_pool_rows(sessions, races)
+    rows, fee_frac = build_pool_rows(sessions, races)
 
     total_secs = sum(s.get("meta", {}).get("duration_seconds") or 0 for s in sessions)
     payload = {
@@ -322,6 +392,12 @@ def main() -> None:
         "last_race_utc": races[-1].get("first_utc") if races else None,
         "min_races_for_rank": MIN_RACES_FOR_RANK,
         "ranking_basis": "first non-empty template",
+        "fee_fraction_pct": round(100.0 * fee_frac, 2),
+        "waste_note": (
+            "waste_min_day = downtime-equivalent minutes of mining lost per day: "
+            "(avg stale ms + fee_fraction x avg empty-template ms) / 600s block interval x 1440. "
+            "Measured relative to the fastest pool at this vantage, so it is a lower bound."
+        ),
         "pools": rows,
         "recent_races": recent_races(races, args.recent),
         "methodology_note": (

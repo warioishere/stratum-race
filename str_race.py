@@ -1161,6 +1161,13 @@ def race_dict(r: Race) -> Dict[str, Any]:
         "arrivals_offset_ms": r.arrival_offsets_ms(),
         "nonempty_arrivals_offset_ms": r.nonempty_arrival_offsets_ms(),
         "empty_first_pools": sorted(r.empty_first),
+        # For empty-first pools: how long their miners hashed the empty
+        # template before the full one arrived.
+        "empty_to_full_ms": {
+            p: ms(r.nonempty_arrivals[p] - r.arrivals[p])
+            for p in r.empty_first
+            if p in r.nonempty_arrivals
+        },
         "arrival_wall": dict(r.arrival_wall),
         "missed_pools": r.missed_pools() if r.confirmed else [],
     }

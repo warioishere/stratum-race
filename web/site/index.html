@@ -63,6 +63,7 @@
             <th class="num" title="This pool's single best (lowest) offset — 0.0 means it delivered the first full template at least once">Best</th>
             <th class="num" title="Races where this pool delivered the first full (non-empty) template, and that as a share of its races">Wins</th>
             <th class="num" title="Share of races where this pool's first notify was an empty (coinbase-only) template — hashing on it earns no fees until the full template arrives">Empty 1st</th>
+            <th class="num" title="Downtime equivalent: expected minutes of mining lost per day to this pool's late templates. Time before ANY new template counts fully (that work would be orphaned); time on an empty template counts only at the current fee share of the block reward. Relative to the fastest pool here, so a lower bound">Waste/day</th>
             <th class="num" title="Races this pool delivered the new block in / total blocks raced">Races</th>
           </tr>
         </thead>
@@ -119,6 +120,15 @@
       <strong>first non-empty template</strong>. All pools are still shown; the <em>Empty&nbsp;1st</em> column reports how
       often a pool led with an empty template, and each block's earlier empty notify (if any) appears as
       <em>Empty jump-start</em>.
+    </p>
+    <p>
+      <strong>Waste per day:</strong> every millisecond a pool is late with a fresh template, its miners hash a block
+      that would be orphaned if found — economically the same as being switched off. The <em>Waste/day</em> column
+      converts each pool's average delay into <strong>downtime-equivalent minutes per day</strong>: time before
+      <em>any</em> new template counts in full, while time spent on an empty template only forfeits the fee share of
+      the reward (<span id="fee-frac">~2</span>% right now — the subsidy is still earned). At today's low fees, empty
+      jump-starts cost miners almost nothing; when fees spike, that math changes dramatically. All figures are
+      relative to the fastest pool from this vantage, so they are lower bounds.
     </p>
     <p>
       A win means <strong>this client observed that pool first from this network vantage point</strong> — it is not proof

@@ -21,6 +21,11 @@
   function prettyName(name) {
     return String(name || "");
   }
+  function formatWaste(v) {
+    if (v === null || v === undefined) return "—";
+    if (v < 0.05) return "<0.1m";
+    return fmt(v, 1) + "m";
+  }
 
   var STATUS = {
     ranked: { dot: "dot-ok", label: "live" },
@@ -77,6 +82,14 @@
       var ef = el("td", "num", !p.empty_first_pct ? "—" : fmt(p.empty_first_pct, 0) + "%");
       if (p.empty_first_pct) ef.title = "First notify was an empty (coinbase-only) template in " + fmt(p.empty_first_pct, 0) + "% of its races";
       tr.appendChild(ef);
+      var wTd = el("td", "num", formatWaste(p.waste_min_day));
+      if (p.waste_min_day !== null && p.waste_min_day !== undefined) {
+        wTd.title = "≈" + fmt(p.waste_min_day, 2) + " min/day of mining lost"
+          + " (avg " + fmt(p.stale_ms_avg, 0) + " ms stale"
+          + (p.empty_gap_ms_avg ? " + " + fmt(p.empty_gap_ms_avg, 0) + " ms on empty templates, fee-weighted" : "")
+          + ")";
+      }
+      tr.appendChild(wTd);
       tr.appendChild(el("td", "num", p.seen + "/" + data.races));
       tbody.appendChild(tr);
     });
@@ -84,7 +97,7 @@
     if (shown.length === 0 && ranked.length > 0) {
       var emptyTr = el("tr");
       var td = el("td", "muted-cell", "No " + currentFilter + " pools ranked yet.");
-      td.colSpan = 9;
+      td.colSpan = 10;
       emptyTr.appendChild(td);
       tbody.appendChild(emptyTr);
     }
@@ -155,6 +168,9 @@
       ? "last aggregation " + data.generated_utc + " · " + (data.sessions || 0) + " measurement sessions"
       : "";
     $("min-races").textContent = String(data.min_races_for_rank || 3);
+    if (data.fee_fraction_pct !== undefined && data.fee_fraction_pct !== null) {
+      $("fee-frac").textContent = "~" + fmt(data.fee_fraction_pct, 1);
+    }
     if (data.vantage) {
       $("vantage").textContent = data.vantage;
       $("vantage-line").classList.remove("hidden");
