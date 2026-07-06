@@ -12,6 +12,7 @@ Connects to multiple Bitcoin solo mining pools simultaneously and compares when 
 
 - Which pool announces a new prevhash (new block) first from your location
 - The delay (in milliseconds) between the fastest and slowest pools for each block
+- Which notifies carry an **empty template** (coinbase-only, no transactions) versus a full template, and how long each pool takes to deliver its first full template — some pools always lead with an empty job to skip transaction-selection time
 - Connection reliability: reconnects, timeouts, and remote closes per pool
 - Optionally enriches results with block height and miner tags from mempool.space
 
@@ -116,7 +117,11 @@ The final report includes:
 - **Block miner summary** — which mining pools found each block (with `--tag-block-miners`)
 - **One-line result** — headline showing 1st and 2nd place at the very end
 
-JSON and CSV exports contain full precision data for further analysis.
+JSON and CSV exports contain full precision data for further analysis. Each
+race in the JSON export includes both `arrivals_offset_ms` (first notify of any
+kind) and `nonempty_arrivals_offset_ms` (first full-template notify), plus
+`winner_nonempty` and `empty_first_pools`, so empty-template jump-starts can be
+separated from real template delivery.
 
 ### Notes
 
@@ -125,6 +130,24 @@ JSON and CSV exports contain full precision data for further analysis.
 - Longer runs produce more statistically meaningful results (20+ races minimum suggested)
 - Sub-millisecond differences in any single race should be treated as noise
 - A 5-minute heartbeat prints during the run to confirm the script is alive
+
+---
+
+## Web leaderboard
+
+The [`web/`](web/) directory contains a self-hostable leaderboard site that
+runs `str_race.py` continuously and publishes live pool rankings — see it
+running at [stratumrace.com](https://stratumrace.com).
+
+Deploying your own takes one command against a fresh Debian/Ubuntu server
+whose DNS you've pointed at it:
+
+```bash
+./web/deploy/deploy.sh --host root@YOUR_SERVER_IP --domain your-domain.example
+```
+
+See [`web/README.md`](web/README.md) for options (`--vantage`, `--reset`),
+day-2 operations, and server migration.
 
 ---
 

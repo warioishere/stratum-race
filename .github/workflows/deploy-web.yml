@@ -1,0 +1,98 @@
+# Manually-triggered deployment of the web leaderboard to a server you control.
+#
+# No credentials are stored in this repository. The SSH password is supplied
+# as a one-time workflow_dispatch input, masked from logs immediately, and
+# never persisted. Prefer SSH keys via repository secrets for long-term use.
+name: Deploy web leaderboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: Server hostname or IP to deploy to
+        required: true
+      domain:
+        description: Public domain for the site (used for nginx + TLS)
+        required: true
+        default: stratumrace.com
+      ssh_user:
+        description: SSH user
+        required: true
+        default: root
+      ssh_password:
+        description: One-time SSH password (masked, not stored)
+        required: true
+      reset_data:
+        description: Set to "yes" to wipe all collected race sessions and restart stats from zero
+        required: false
+        default: "no"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mask password
+        env:
+          PW: ${{ inputs.ssh_password }}
+        run: echo "::add-mask::$PW"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install sshpass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass rsync
+
+      - name: Sync code to server
+        env:
+          SSHPASS: ${{ inputs.ssh_password }}
+          HOST: ${{ inputs.host }}
+          SSH_USER: ${{ inputs.ssh_user }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
+          sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" "mkdir -p /opt/stratum-race"
+          sshpass -e rsync -a --delete --exclude '.git' -e "ssh $SSH_OPTS" ./ "$SSH_USER@$HOST:/opt/stratum-race/"
+
+      - name: Reset collected data
+        if: inputs.reset_data == 'yes'
+        env:
+          SSHPASS: ${{ inputs.ssh_password }}
+          HOST: ${{ inputs.host }}
+          SSH_USER: ${{ inputs.ssh_user }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
+          sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
+            "systemctl stop stratum-racer 2>/dev/null || true; rm -f /var/lib/stratum-race/sessions/session-*.json; echo 'race sessions wiped'"
+
+      - name: Run setup on server
+        env:
+          SSHPASS: ${{ inputs.ssh_password }}
+          HOST: ${{ inputs.host }}
+          SSH_USER: ${{ inputs.ssh_user }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20"
+          sshpass -e ssh $SSH_OPTS "$SSH_USER@$HOST" \
+            "DOMAIN=$DOMAIN bash /opt/stratum-race/web/deploy/setup.sh"
+
+      - name: Verify site responds
+        env:
+          HOST: ${{ inputs.host }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          set -euo pipefail
+          sleep 3
+          echo "--- HTTP status ---"
+          curl -sS -o /dev/null -w "%{http_code}\n" "http://$HOST/" -H "Host: $DOMAIN"
+          echo "--- leaderboard.json head ---"
+          curl -sS "http://$HOST/data/leaderboard.json" -H "Host: $DOMAIN" | head -c 400
+          echo
+          echo "--- HTTPS (if certbot succeeded) ---"
+          curl -sS -o /dev/null -w "%{http_code}\n" "https://$DOMAIN/" --resolve "$DOMAIN:443:$HOST" || true

@@ -1,0 +1,27 @@
+[Unit]
+Description=Stratum Race continuous racer and leaderboard aggregator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stratumrace
+Group=stratumrace
+Environment=REPO_DIR=/opt/stratum-race
+Environment=DATA_DIR=/var/lib/stratum-race/sessions
+Environment=WEB_ROOT=/var/www/stratumrace
+EnvironmentFile=-/etc/stratum-race/racer.env
+ExecStart=/opt/stratum-race/web/run_races.sh
+Restart=always
+RestartSec=15
+# Stop by signalling only the runner script; it interrupts the racer with
+# SIGINT so the in-flight session finalizes and writes before exit.
+KillMode=mixed
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/stratum-race /var/www/stratumrace/data
+
+[Install]
+WantedBy=multi-user.target

@@ -278,6 +278,7 @@ class PoolState:
     noise_prevhash_changes: int = 0
     parse_errors: int = 0
     bad_notify: int = 0
+    empty_notifies: int = 0     # notifies whose template had no transactions
 
     def record_reconnect(self, reason: str) -> None:
         """Count an established-session reconnect in one place."""
@@ -310,6 +311,11 @@ class Race:
     eligible_at_start: Set[str]
     arrivals: Dict[str, float] = field(default_factory=dict)
     arrival_wall: Dict[str, str] = field(default_factory=dict)
+    # First arrival per pool that carried a non-empty template. Pools that led
+    # with an empty template appear here only once their full template lands
+    # within the confirm window.
+    nonempty_arrivals: Dict[str, float] = field(default_factory=dict)
+    empty_first: Set[str] = field(default_factory=set)  # pools whose first notify was empty
     confirmed: bool = False
     closed: bool = False
     counted: Set[str] = field(default_factory=set)
@@ -326,6 +332,20 @@ class Race:
             pool_name: ms(arrival_ts - self.first_ts)
             for pool_name, arrival_ts in self.arrivals.items()
         }
+
+    def nonempty_arrival_offsets_ms(self) -> Dict[str, float]:
+        if not self.nonempty_arrivals:
+            return {}
+        base = min(self.nonempty_arrivals.values())
+        return {
+            pool_name: ms(arrival_ts - base)
+            for pool_name, arrival_ts in self.nonempty_arrivals.items()
+        }
+
+    def nonempty_winner(self) -> Optional[str]:
+        if not self.nonempty_arrivals:
+            return None
+        return min(self.nonempty_arrivals, key=self.nonempty_arrivals.get)
 
     def missed_pools(self) -> List[str]:
         return sorted(self.eligible_at_start - set(self.arrivals))
@@ -427,9 +447,12 @@ class RaceTracker:
         prevhash: str,
         clean: bool,
         pools: Dict[str, PoolState],
+        empty: bool = False,
     ) -> None:
         pool = pools[pool_name]
         pool.notify_total += 1
+        if empty:
+            pool.empty_notifies += 1
         pool.last_notify_at_wall = local_iso()
         if pool.first_notify_at_wall is None:
             pool.first_notify_at_wall = pool.last_notify_at_wall
@@ -449,8 +472,20 @@ class RaceTracker:
             _print(pool_name, f"baseline {short_hash(prevhash)} clean={clean}")
             return
 
-        # Same prevhash. clean=false is expected template-refresh noise.
+        # Same prevhash. clean=false is expected template-refresh noise, but a
+        # same-prevhash refresh is also where an empty-first pool delivers its
+        # full template — record that as the pool's non-empty arrival.
         if prevhash == old_ph:
+            race = self.active.get(prevhash)
+            if (
+                race is not None
+                and pool_name in race.arrivals
+                and pool_name not in race.nonempty_arrivals
+                and not empty
+            ):
+                race.nonempty_arrivals[pool_name] = recv_ts
+                delay = ms(recv_ts - race.arrivals[pool_name])
+                _print(pool_name, f"full template {short_hash(prevhash)} +{fnum(delay)} ms after empty")
             if not clean:
                 pool.noise_repeats += 1
             return
@@ -475,6 +510,10 @@ class RaceTracker:
             if pool_name not in race.arrivals:
                 race.arrivals[pool_name] = recv_ts
                 race.arrival_wall[pool_name] = local_iso()
+                if empty:
+                    race.empty_first.add(pool_name)
+                else:
+                    race.nonempty_arrivals[pool_name] = recv_ts
                 delay = ms(recv_ts - race.first_ts)
                 _print(pool_name, f"match {short_hash(prevhash)} delay={fnum(delay)} ms")
 
@@ -526,6 +565,10 @@ class RaceTracker:
         )
         race.arrivals[pool_name] = recv_ts
         race.arrival_wall[pool_name] = race.first_wall
+        if empty:
+            race.empty_first.add(pool_name)
+        else:
+            race.nonempty_arrivals[pool_name] = recv_ts
 
         self.active[prevhash] = race
         self.all_races.append(race)
@@ -1093,6 +1136,7 @@ def pool_summary_dict(p: PoolState) -> Dict[str, Any]:
         "noise_prevhash_changes": p.noise_prevhash_changes,
         "parse_errors": p.parse_errors,
         "bad_notify": p.bad_notify,
+        "empty_notifies": p.empty_notifies,
         "first_notify_at_wall": p.first_notify_at_wall,
         "last_notify_at_wall": p.last_notify_at_wall,
     }
@@ -1107,6 +1151,7 @@ def race_dict(r: Race) -> Dict[str, Any]:
         "block_miner": r.block_miner,
         "block_miner_source": r.block_miner_source,
         "winner": r.first_pool,
+        "winner_nonempty": r.nonempty_winner(),
         "first_wall": r.first_wall,
         "first_epoch": r.first_epoch,
         "first_utc": r.first_utc,
@@ -1114,6 +1159,8 @@ def race_dict(r: Race) -> Dict[str, Any]:
         "closed": r.closed,
         "eligible_at_start": sorted(r.eligible_at_start),
         "arrivals_offset_ms": r.arrival_offsets_ms(),
+        "nonempty_arrivals_offset_ms": r.nonempty_arrival_offsets_ms(),
+        "empty_first_pools": sorted(r.empty_first),
         "arrival_wall": dict(r.arrival_wall),
         "missed_pools": r.missed_pools() if r.confirmed else [],
     }
@@ -1516,12 +1563,20 @@ async def pool_worker(
 
                 clean = bool(params[8]) if len(params) > 8 else False
 
+                # An empty merkle-branch list means the template contains only the
+                # coinbase: an "empty block" notify sent before the pool has done
+                # transaction selection/validation. Some pools always send one of
+                # these first, then follow with the full template.
+                merkle = params[4] if len(params) > 4 else None
+                empty_template = isinstance(merkle, list) and len(merkle) == 0
+
                 tracker.handle_notify(
                     pool_name=name,
                     recv_ts=recv_ts,
                     prevhash=prevhash,
                     clean=clean,
                     pools=pools,
+                    empty=empty_template,
                 )
 
         except ReconnectSession as e:
